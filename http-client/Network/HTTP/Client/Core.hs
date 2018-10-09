@@ -6,6 +6,7 @@ module Network.HTTP.Client.Core
     , httpNoBody
     , httpRaw
     , httpRaw'
+    , requestAction
     , getModifiedRequestManager
     , responseOpen
     , responseClose
@@ -25,11 +26,13 @@ import Network.HTTP.Client.Response
 import Network.HTTP.Client.Cookies
 import Data.Maybe (fromMaybe, isJust)
 import Data.Time
+import Data.IORef
 import Control.Exception
 import qualified Data.ByteString.Lazy as L
 import Data.Monoid
 import Control.Monad (void)
 import System.Timeout (timeout)
+import System.IO.Unsafe (unsafePerformIO)
 import Data.KeyedPool
 import GHC.IO.Exception (IOException(..), IOErrorType(..))
 
@@ -88,7 +91,15 @@ httpRaw'
      -> Manager
      -> IO (Request, Response BodyReader)
 httpRaw' req0 m = do
+    action <- readIORef requestAction
     let req' = mSetProxy m req0
+    action req' m
+
+requestAction :: IORef (Request -> Manager -> IO (Request, Response BodyReader))
+{-# NOINLINE requestAction #-}
+requestAction = unsafePerformIO (newIORef go)
+ where
+  go req' m = do
     (req, cookie_jar') <- case cookieJar req' of
         Just cj -> do
             now <- getCurrentTime
@@ -111,7 +122,7 @@ httpRaw' req0 m = do
         -- Connection was reused, and might have been closed. Try again
         Left e | managedReused mconn && mRetryableException m e -> do
             managedRelease mconn DontReuse
-            httpRaw' req m
+            go req m
         -- Not reused, or a non-retry, so this is a real exception
         Left e -> do
           -- Explicitly release connection for all real exceptions:
@@ -126,7 +137,7 @@ httpRaw' req0 m = do
                 let (cookie_jar, _) = updateCookieJar res req now' cookie_jar'
                 return (req, res {responseCookieJar = cookie_jar})
             Nothing -> return (req, res)
-  where
+   where
     getConnectionWrapper mtimeout f =
         case mtimeout of
             Nothing -> fmap ((,) Nothing) f
